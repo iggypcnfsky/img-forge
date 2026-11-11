@@ -10,6 +10,10 @@ you typo one.
 
 Zero dependencies. Node ≥ 20.
 
+Pairs with [Figma Bridge](https://github.com/iggypcnfsky/figma-bridge): generate here, place there with
+`./bin/figma image <nodeId> <file>`, or use the plugin's Generate / Edit panel, which runs this CLI
+through the bridge server.
+
 ## Install
 
 ```bash

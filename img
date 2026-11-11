@@ -16,8 +16,8 @@ import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
-// Minimalny .env z katalogu narzędzia: IMG_FORGE_CONFIG, IMG_FORGE_CACHE, FAL_KEY.
-// Bez zależności, bez nadpisywania tego, co już jest w środowisku.
+// Minimal .env next to this script: IMG_FORGE_CONFIG, IMG_FORGE_CACHE, FAL_KEY.
+// No dependency, and never overrides what the environment already provides.
 function loadDotEnv(file) {
   if (!existsSync(file)) return
   for (const line of readFileSync(file, 'utf8').split('\n')) {
@@ -240,7 +240,7 @@ function buildPayload(flags, fields) {
   if (!flags.prompt) die('missing --prompt (or --prompt-file, or pipe the prompt with -)')
   payload.prompt = flags.prompt
 
-  // skróty: to samo pole, ale czytelniej w CLI
+  // shortcuts: the same fields, just friendlier on the command line
   if (flags.reasoning !== undefined) set('reasoning_effort', flags.reasoning)
   if (flags.quality !== undefined) set('quality', flags.quality)
   if (flags.background !== undefined) set('background', flags.background)
@@ -427,7 +427,7 @@ function estimateCost(entry, payload) {
   const refs = Array.isArray(payload.image_urls) ? payload.image_urls.length : 0
   const referenceTokens = refs * (pricing.referenceTokensPerImage || 0)
   const images = Number(payload.num_images || 1)
-  // Wejście: prompt (tanie) + referencje, jeśli to edycja. Wyjście: wygenerowane obrazy.
+  // Input: the prompt (cheap) plus references for an edit. Output: the generated images.
   const promptTokens = Math.max(1, Math.ceil(String(payload.prompt || '').length / 4))
   const inputTokens = promptTokens + referenceTokens
   const inputCost = (inputTokens * (pricing.textInputTokensPerM || 0)) / 1e6
@@ -520,7 +520,7 @@ async function cmdGen(flags) {
   const { payload } = buildPayload(flags, fields)
   const sizeInfo = applySize(payload, flags, fields, entry)
 
-  // walidacja typów po zbudowaniu (schema jest źródłem prawdy)
+  // re-validate types after building the payload (the schema is the source of truth)
   for (const [key, value] of Object.entries(payload)) {
     const field = fields[key]
     if (!field) continue
@@ -549,7 +549,7 @@ async function cmdGen(flags) {
       console.log(`payload: ${JSON.stringify(payload, null, 2).split('\n').join('\n         ')}`)
       if (sizeInfo) console.log(`size:    ${sizeInfo.width}×${sizeInfo.height} via ${sizeInfo.param}`)
       console.log(costLine)
-      if (overLimit) console.log(`uwaga: przekracza --max-usd ${maxUsd} — realny przebieg zostałby odrzucony`)
+      if (overLimit) console.log(`warning: above --max-usd ${maxUsd} — a real run would be refused`)
       console.log(`output:  ${outFile}`)
       console.log('dry run — nothing was generated')
     }
