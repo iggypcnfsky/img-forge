@@ -6,7 +6,7 @@ whenToUse: "The user asks to generate an image, produce visual assets, restyle o
 
 # img-forge
 
-CLI over fal.ai. The model's OpenAPI schema is the source of truth for parameters — ask the schema
+CLI over fal.ai. Repo: https://github.com/iggypcnfsky/img-forge The model's OpenAPI schema is the source of truth for parameters — ask the schema
 instead of guessing what a model accepts.
 
 ## Preconditions
