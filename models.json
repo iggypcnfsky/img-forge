@@ -24,6 +24,29 @@
         "assumes": "base tokens are for a 1024x1024 output; scaled linearly by pixel area. Rounded up to $0.0001 by fal."
       }
     },
+    "openai/gpt-image-2.6/flare/text-to-image": {
+      "label": "GPT Image 2.6 Flare",
+      "sizeMode": "dims",
+      "sizeParam": "image_size",
+      "costPerImageUsd": null,
+      "notes": "OpenAI precision image model, Flare variant. Same knobs as Sunburst (reasoning_effort low|medium|high, quality auto..max, background auto|transparent|opaque) plus frame_count / frame_duration_ms and output_format svg|gif for animated or vector output. The panel and the Figma insert path expect a raster, so keep --format png unless you deliberately want otherwise.",
+      "pricing": {
+        "currency": "USD",
+        "imageOutputTokensPerM": 30.0,
+        "imageInputTokensPerM": 8.0,
+        "textInputTokensPerM": 5.0,
+        "baseImageTokens": {
+          "low": 272,
+          "medium": 1056,
+          "high": 4160,
+          "auto": 1056,
+          "xhigh": 8320,
+          "max": 12480
+        },
+        "referenceTokensPerImage": 1568,
+        "assumes": "base tokens are for a 1024x1024 output; scaled linearly by pixel area. Rounded up to $0.0001 by fal."
+      }
+    },
     "fal-ai/nano-banana": {
       "label": "Nano Banana (Gemini image)",
       "sizeMode": "aspect",
@@ -76,6 +99,29 @@
       "sizeParam": "image_size",
       "costPerImageUsd": null,
       "notes": "Reference-driven editing: image_urls (required), optional mask_url / markup_image_url. Same reasoning_effort and quality knobs as the text-to-image sibling.",
+      "pricing": {
+        "currency": "USD",
+        "imageOutputTokensPerM": 30.0,
+        "imageInputTokensPerM": 8.0,
+        "textInputTokensPerM": 5.0,
+        "baseImageTokens": {
+          "low": 272,
+          "medium": 1056,
+          "high": 4160,
+          "auto": 1056,
+          "xhigh": 8320,
+          "max": 12480
+        },
+        "referenceTokensPerImage": 1568,
+        "assumes": "base tokens are for a 1024x1024 output; scaled linearly by pixel area. Rounded up to $0.0001 by fal."
+      }
+    },
+    "openai/gpt-image-2.6/flare/edit": {
+      "label": "GPT Image 2.6 Flare (edit)",
+      "sizeMode": "dims",
+      "sizeParam": "image_size",
+      "costPerImageUsd": null,
+      "notes": "Reference-driven editing, Flare variant. image_urls required, optional mask_url / markup_image_url. Same reasoning_effort and quality levels as Sunburst; image_size accepts auto or explicit dimensions.",
       "pricing": {
         "currency": "USD",
         "imageOutputTokensPerM": 30.0,
