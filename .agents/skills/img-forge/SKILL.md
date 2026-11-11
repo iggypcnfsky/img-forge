@@ -1,82 +1,91 @@
 ---
 name: img-forge
-description: Generate images with fal.ai models from the command line, then place them on a Figma canvas. Use when a task needs artwork, a hero image, a texture, an icon or a mockup image generated — especially when it should end up inside a Figma frame. Schema-driven: every parameter is validated against the model's own OpenAPI spec.
-whenToUse: The user asks to generate an image, produce visual assets, or fill/show something on the Figma canvas with generated artwork.
+description: "Generate or edit images with fal.ai models from the command line, then place them on a Figma canvas. Use when a task needs artwork, a hero image, a texture, an icon or a retouched photo — especially when it should end up inside a Figma frame or file. Every parameter is validated against the model's own OpenAPI schema, cost is estimated before any request, and identical runs are cached."
+whenToUse: "The user asks to generate an image, produce visual assets, restyle or retouch an existing image, or fill a Figma canvas with generated artwork."
 ---
 
 # img-forge
 
-CLI over fal.ai. The model's OpenAPI schema is the source of truth for parameters — so always ask the
-schema instead of guessing what a model accepts.
+CLI over fal.ai. The model's OpenAPI schema is the source of truth for parameters — ask the schema
+instead of guessing what a model accepts.
 
 ## Preconditions
 
 ```bash
 cd <tools>/img-forge
-./img auth            # does a FAL_KEY exist?
+./img auth            # is a FAL_KEY available?
 ./img models          # which models are registered
 ```
 
-No key → stop and ask the user for one (`FAL_KEY` or `~/.config/img-forge/key`). Do not invent a key
+No key → stop and ask the user for one (`FAL_KEY`, or `~/.config/img-forge/key`). Do not invent one
 and do not silently skip the step.
 
 ## The loop
 
-1. **Inspect.** `./img models inspect <endpoint-id>` — lists the real parameters, their enums and
-   defaults. Unknown id → 404, so verify before spending.
-2. **Dry run.** `./img gen ... --dry-run` prints the exact payload and the cost estimate, and needs
-   no key.
-3. **Generate.** Drop `--dry-run`. If the model has no `costPerImageUsd` in `models.json`, the CLI
-   refuses unless you pass `--yes` — only do that when the user has agreed to spend.
-4. **Place.** `cd ../figma-bridge && ./bin/figma image <nodeId> <file> FILL` (or `FIT`/`TILE`/`CROP`).
-5. **Verify.** `./bin/figma export <nodeId> out/check.png PNG 1` and look at the image.
+1. **Inspect.** `./img models inspect <endpoint-id>` lists the real parameters, enums and defaults.
+   An unknown id returns 404, so verify before spending.
+2. **Dry run.** `./img gen … --dry-run` prints the exact payload, the size and the cost estimate; it
+   needs no key and spends nothing.
+3. **Generate.** Drop `--dry-run`. If the estimate exceeds `--max-usd` (default `$0.5`) the CLI
+   refuses before touching the network.
+4. **Place (optional).** `cd ../figma-bridge && ./bin/figma image <nodeId> <file> FILL` renders it into
+   the canvas; `./bin/figma export <nodeId> out/check.png PNG 2` verifies what came out.
+5. **Report the manifest.** `<file>.json` next to the image holds the payload, seed and request id.
 
-## Editing instead of generating
+## Generating
 
-`img gen` = text → image. `img edit` = image(s) + text → image, with references:
+```bash
+./img gen --prompt "matte black desk lamp on concrete, soft window light" \
+          --preset 16:9@2k --reasoning high --quality xhigh --dry-run
+./img gen --prompt "…" --preset 1:1@1024 --quality medium --yes
+```
+
+`--preset` is `<aspect>@<long-edge>` (`1:1@1k`, `16:9@2k`, `9:16@1080`, `1:1@1024`) or an explicit
+`--size 1536x864`. The tool maps it onto whatever the model actually uses (`image_size` dims, an
+`image_size` enum, or `aspect_ratio`).
+
+## Editing an existing image
 
 ```bash
 ./img edit --prompt "make this card glassmorphism, keep the text" --ref out/card.png
-./img edit --prompt "recolor to brand green" --ref out/card.png --ref palette.png
+./img edit --prompt "recolor to brand green" --ref out/card.png --ref palette.png --dry-run
+./img edit --prompt "remove the logo" --ref shot.png --mask mask.png
 ```
 
-References can be local files (uploaded to the fal CDN for you, `--ref`) or URLs (`--ref-url`).
-Masks and annotations: `--mask`, `--markup`. A reference that Figma has selected can be exported with
-`./bin/figma export <nodeId> out/sel.png PNG 2` and passed straight in — always prefer the user's
-actual selection over a guess.
+References are local files (`--ref`, uploaded to the fal CDN for you) or URLs (`--ref-url`). Masks and
+annotations: `--mask`, `--markup`. To edit what the user selected in Figma, export it first —
+`./bin/figma export <nodeId> out/sel.png PNG 2` — and pass that file; always prefer the user's actual
+selection over a guess.
 
-## Examples
+## Cost discipline
 
-```bash
-# expensive/precise model, full control
-./img gen --prompt "matte black desk lamp on concrete, soft window light" \
-          --preset 16:9@2k --reasoning high --quality xhigh --dry-run
+- Estimates come from `models.json` pricing (`$30/1M` output image tokens by default) and scale with
+  pixel area; they are estimates, not invoices.
+- `--yes` is only for accepting an unknown cost. Never raise `--max-usd` on your own initiative, and
+  never run `--n 4` unless the user asked for variants.
+- The cache keys on `sha256(model + payload + reference hashes)`: a repeat run costs nothing. Use
+  `--no-cache` only when the user wants a fresh sample.
+- `./img spend` summarises what was recorded.
 
-# fast cheap one, aspect based
-./img gen --prompt "abstract purple gradient" --preset 1:1@1k --model fal-ai/nano-banana
+## The Figma panel (for humans)
 
-# anything the schema offers, without a dedicated flag
-./img gen --prompt "..." --set num_inference_steps=28 --set guidance_scale=3.5
-```
+The Figma Bridge plugin window has a Generate / Edit panel that posts jobs to its local server, which
+runs this same CLI. Agents should call the CLI directly — it is the full surface (mask, variants,
+`--dry-run`, spend log), while the panel covers the everyday cases. Presets saved from the panel live
+in `figma-bridge/presets.json` and are shared with this tool.
 
 ## Rules
 
-- **Dry run first.** It costs nothing and catches typos that would otherwise cost money.
-- **Never spend without consent.** No `--yes` unless the user asked for a generation explicitly; no
-  `--max-usd` raising on your own initiative.
-- **Trust the schema, not memory.** If a flag is rejected, the error lists the real parameters — use
-  it, do not retry with guesses.
-- **Keep the manifest.** `<file>.json` next to the image holds the payload and seed; report the path,
-  it is what makes a run reproducible.
-- **One image at a time** unless the user asked for variants. `--n` costs `n ×` the estimate.
-- **Do not commit** `out/`, `.env` or `.cache/`.
+- Dry run first when the model or the settings are new.
+- Trust the schema, not memory: a rejected flag lists the parameters that do exist.
+- Do not commit `out/`, `.env`, `.cache/` or `presets.json`.
+- Report the file path and the manifest path, not just "it worked".
 
 ## Pitfalls
 
-- `--preset` on an enum-size model only picks an aspect; the resolution name is ignored. Use
-  `--size WIDTHxHEIGHT` when exact pixels matter.
-- Cost estimates come from a registry, not from fal — they are approximate. `./img spend` reports what
-  was *recorded*, not what was charged.
-- Cached results mean zero cost: the same payload twice returns the cached file. Use `--no-cache` when
-  you actually want a fresh sample.
-- Figma `imageFill` is a fill, not a layer: `FILL` crops, `FIT` letterboxes. Choose deliberately.
+- `--preset` on an enum-size model only picks an aspect; the resolution in the name is ignored. Use
+  `--size WxH` when exact pixels matter.
+- Cached results return the old file. That is the point, but mention it to the user.
+- `image_size` caps at 14142 px per side on most fal endpoints; the panel enforces 64–8192.
+- A model without `costPerImageUsd` and without a `pricing` block makes the CLI refuse without
+  `--yes` — that is deliberate.
