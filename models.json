@@ -6,28 +6,92 @@
       "sizeMode": "dims",
       "sizeParam": "image_size",
       "costPerImageUsd": null,
-      "notes": "OpenAI precision image model. reasoning_effort low|medium|high, quality auto..max, background auto|transparent|opaque."
+      "notes": "OpenAI precision image model. reasoning_effort low|medium|high, quality auto..max, background auto|transparent|opaque.",
+      "pricing": {
+        "currency": "USD",
+        "imageOutputTokensPerM": 30.0,
+        "imageInputTokensPerM": 8.0,
+        "textInputTokensPerM": 5.0,
+        "baseImageTokens": {
+          "low": 272,
+          "medium": 1056,
+          "high": 4160,
+          "auto": 1056,
+          "xhigh": 8320,
+          "max": 12480
+        },
+        "referenceTokensPerImage": 1568,
+        "assumes": "base tokens are for a 1024x1024 output; scaled linearly by pixel area. Rounded up to $0.0001 by fal."
+      }
     },
     "fal-ai/nano-banana": {
       "label": "Nano Banana (Gemini image)",
       "sizeMode": "aspect",
       "sizeParam": "aspect_ratio",
       "costPerImageUsd": null,
-      "notes": "Fast, cheap, aspect_ratio based; no reasoning or quality knobs."
+      "notes": "Fast, cheap, aspect_ratio based; no reasoning or quality knobs.",
+      "pricing": {
+        "currency": "USD",
+        "imageOutputTokensPerM": 30.0,
+        "imageInputTokensPerM": 8.0,
+        "textInputTokensPerM": 5.0,
+        "baseImageTokens": {
+          "low": 272,
+          "medium": 1056,
+          "high": 4160,
+          "auto": 1056,
+          "xhigh": 8320,
+          "max": 12480
+        },
+        "referenceTokensPerImage": 1568,
+        "assumes": "base tokens are for a 1024x1024 output; scaled linearly by pixel area. Rounded up to $0.0001 by fal."
+      }
     },
     "fal-ai/flux/dev": {
       "label": "FLUX.1 dev",
       "sizeMode": "dims",
       "sizeParam": "image_size",
       "costPerImageUsd": null,
-      "notes": "Classic dev model: prompt, image_size, num_inference_steps, guidance_scale."
+      "notes": "Classic dev model: prompt, image_size, num_inference_steps, guidance_scale.",
+      "pricing": {
+        "currency": "USD",
+        "imageOutputTokensPerM": 30.0,
+        "imageInputTokensPerM": 8.0,
+        "textInputTokensPerM": 5.0,
+        "baseImageTokens": {
+          "low": 272,
+          "medium": 1056,
+          "high": 4160,
+          "auto": 1056,
+          "xhigh": 8320,
+          "max": 12480
+        },
+        "referenceTokensPerImage": 1568,
+        "assumes": "base tokens are for a 1024x1024 output; scaled linearly by pixel area. Rounded up to $0.0001 by fal."
+      }
     },
     "openai/gpt-image-2.6/sunburst/edit": {
       "label": "GPT Image 2.6 Sunburst (edit)",
       "sizeMode": "dims",
       "sizeParam": "image_size",
       "costPerImageUsd": null,
-      "notes": "Reference-driven editing: image_urls (required), optional mask_url / markup_image_url. Same reasoning_effort and quality knobs as the text-to-image sibling."
+      "notes": "Reference-driven editing: image_urls (required), optional mask_url / markup_image_url. Same reasoning_effort and quality knobs as the text-to-image sibling.",
+      "pricing": {
+        "currency": "USD",
+        "imageOutputTokensPerM": 30.0,
+        "imageInputTokensPerM": 8.0,
+        "textInputTokensPerM": 5.0,
+        "baseImageTokens": {
+          "low": 272,
+          "medium": 1056,
+          "high": 4160,
+          "auto": 1056,
+          "xhigh": 8320,
+          "max": 12480
+        },
+        "referenceTokensPerImage": 1568,
+        "assumes": "base tokens are for a 1024x1024 output; scaled linearly by pixel area. Rounded up to $0.0001 by fal."
+      }
     }
   },
   "editDefault": "openai/gpt-image-2.6/sunburst/edit"

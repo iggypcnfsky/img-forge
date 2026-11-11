@@ -100,6 +100,11 @@ cd ../figma-bridge && ./bin/figma image 12:34 ../img-forge/out/cover.png FILL
 `./bin/figma image <nodeId> <file> [FILL|FIT|TILE|CROP]` base64-encodes the file and applies it as a
 fill through `figma.createImage` — no upload to Figma's cloud.
 
+There is also a UI for the same engine: the Figma Bridge plugin window has a Generate / Edit panel
+that posts jobs to its local server, which in turn runs this CLI — so the panel and the terminal share
+one implementation. Presets saved from the panel live in `figma-bridge/presets.json` and appear here
+too. See [the bridge README](../figma-bridge/README.md#image-generation).
+
 ## Adding a model
 
 `models.json` in this directory (or `~/.config/img-forge/models.json`, which wins):
