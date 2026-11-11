@@ -31,6 +31,20 @@ and do not silently skip the step.
 4. **Place.** `cd ../figma-bridge && ./bin/figma image <nodeId> <file> FILL` (or `FIT`/`TILE`/`CROP`).
 5. **Verify.** `./bin/figma export <nodeId> out/check.png PNG 1` and look at the image.
 
+## Editing instead of generating
+
+`img gen` = text → image. `img edit` = image(s) + text → image, with references:
+
+```bash
+./img edit --prompt "make this card glassmorphism, keep the text" --ref out/card.png
+./img edit --prompt "recolor to brand green" --ref out/card.png --ref palette.png
+```
+
+References can be local files (uploaded to the fal CDN for you, `--ref`) or URLs (`--ref-url`).
+Masks and annotations: `--mask`, `--markup`. A reference that Figma has selected can be exported with
+`./bin/figma export <nodeId> out/sel.png PNG 2` and passed straight in — always prefer the user's
+actual selection over a guess.
+
 ## Examples
 
 ```bash

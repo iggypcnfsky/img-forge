@@ -80,6 +80,7 @@ function parseArgs(argv) {
       }
     }
     if (key === 'set') args.set[value.split('=')[0]] = value.slice(value.indexOf('=') + 1)
+    else if (['ref', 'refUrl', 'mask', 'markup'].includes(key)) (args[key] = args[key] || []).push(value)
     else args[key] = value
   }
   return args
@@ -91,6 +92,7 @@ function loadRegistry() {
   const user = existsSync(userFile) ? readJSON(userFile, { models: {} }) : { models: {} }
   return {
     default: user.default || base.default,
+    editDefault: user.editDefault || base.editDefault,
     models: { ...(base.models || {}), ...(user.models || {}) },
   }
 }
@@ -300,6 +302,58 @@ function applySize(payload, flags, fields, model) {
   return { width, height, param, mode }
 }
 
+// ------------------------------------------------------------------ uploads
+
+const MIME = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+}
+
+/** Uploads a local file to the fal CDN and returns a public URL for it. */
+async function uploadFile(file, key) {
+  const bytes = readFileSync(file)
+  const contentType = MIME[extname(file).toLowerCase()] || 'application/octet-stream'
+  const init = await fetch('https://rest.fal.ai/storage/upload/initiate?storage_type=fal-cdn-v3', {
+    method: 'POST',
+    headers: { authorization: `Key ${key}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ content_type: contentType, file_name: basename(file) }),
+  })
+  const text = await init.text()
+  if (!init.ok) die(`upload init failed (HTTP ${init.status}): ${text.slice(0, 300)}`)
+  let ticket
+  try {
+    ticket = JSON.parse(text)
+  } catch {
+    die(`upload init returned non-JSON: ${text.slice(0, 200)}`)
+  }
+  const put = await fetch(ticket.upload_url, {
+    method: 'PUT',
+    headers: { 'content-type': contentType },
+    body: bytes,
+  })
+  if (!put.ok) die(`upload failed (HTTP ${put.status}): ${(await put.text()).slice(0, 200)}`)
+  return { url: ticket.file_url, bytes: bytes.length }
+}
+
+/** Registers every local reference (or passes URLs through) and returns their URLs. */
+async function uploadRefs(refs, key) {
+  const out = []
+  for (const ref of refs) {
+    if (/^https?:\/\//.test(ref)) {
+      out.push(ref)
+      continue
+    }
+    if (!existsSync(ref)) die(`reference not found: ${ref}`)
+    process.stderr.write(`  uploading ${basename(ref)}…\n`)
+    const { url } = await uploadFile(ref, key)
+    out.push(url)
+  }
+  return out
+}
+
 // ------------------------------------------------------------------- fal calls
 
 async function submit(modelId, payload, key) {
@@ -369,12 +423,13 @@ async function download(url, file) {
 
 const HELP = `img-forge — image generation through fal.ai
 
-  img gen --model <id> --prompt "..." [opts]
+  img gen  --prompt "..." [--preset …] [opts]        text → image
+  img edit --prompt "..." --ref <file> [opts]       image(s) + text → image
   img models [inspect <id>]
   img spend [--days 7]
   img auth
 
-gen options
+options (gen and edit)
   --model <id>          fal endpoint id (default from models.json)
   --prompt <text>       prompt; "-" reads it from stdin
   --prompt-file <path>
@@ -386,6 +441,10 @@ gen options
   --format <fmt>        output format (png, webp, ...)
   --n <int>             number of images
   --seed <int>
+  --ref <file>          edit: reference image (repeatable)
+  --ref-url <https://…> edit: reference by URL (repeatable)
+  --mask <file>         edit: mask image
+  --markup <file>       edit: markup/annotation image
   --set key=value       any other model parameter; validated against the schema
   --out <path>          output file (default out/gen/<slug>.<ext>)
   --dry-run             print the payload and cost estimate, call nothing
@@ -499,6 +558,121 @@ async function cmdGen(flags) {
   }
 }
 
+async function cmdEdit(flags) {
+  const registry = loadRegistry()
+  const modelId = flags.model || registry.editDefault || registry.default
+  if (!modelId) die('no --model and no default in models.json')
+
+  const refs = [...(flags.ref || []), ...(flags.refUrl || [])]
+  if (refs.length === 0) die('edit needs at least one reference: --ref <file> or --ref-url <https://…>')
+  if (flags.set && flags.set.image_urls !== undefined) {
+    die('pass references with --ref/--ref-url (they are uploaded for you), not --set image_urls')
+  }
+  if (flags.promptFile) flags.prompt = readFileSync(flags.promptFile, 'utf8')
+  if (flags.prompt === '-') flags.prompt = readFileSync(0, 'utf8')
+  if (flags.prompt) flags.prompt = String(flags.prompt).trim()
+
+  const entry = registry.models[modelId] || null
+  const doc = await getSchema(modelId, { refresh: Boolean(flags.refreshSchema) })
+  const { fields } = inputFields(doc)
+  if (!fields.image_urls) {
+    die(`${modelId} has no "image_urls" parameter — that is a text-to-image model, use: img gen`)
+  }
+
+  const { payload } = buildPayload(flags, fields)
+  const sizeInfo = applySize(payload, flags, fields, entry)
+
+  const localHashes = refs.map((r) => (/^https?:\/\//.test(r) ? r : sha(readFileSync(r)))).join(',')
+  const cacheKey = sha(`${modelId}\n${JSON.stringify(payload)}\n${localHashes}`)
+  const ext = (payload.output_format || 'png').toLowerCase()
+  const slug = (flags.name || 'edit').toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 48) || 'edit'
+  const outFile = resolve(flags.out || join('out', 'gen', `${slug}-${cacheKey.slice(0, 8)}.${ext}`))
+  const n = Number(payload.num_images || 1)
+  const unit = entry?.costPerImageUsd
+  const estimate = typeof unit === 'number' ? Number((unit * n).toFixed(3)) : null
+  const maxUsd = Number(flags.maxUsd ?? DEFAULT_MAX_USD)
+
+  if (flags.dryRun) {
+    const preview = { ...payload, image_urls: refs.map((r) => (/^https?:/.test(r) ? r : `<upload ${basename(r)}>`)) }
+    if (flags.json) {
+      console.log(JSON.stringify({ ok: true, dryRun: true, model: modelId, payload: preview, cost: estimate, out: outFile }, null, 2))
+    } else {
+      console.log(`model:   ${modelId}${entry ? ` (${entry.label})` : ''}`)
+      console.log(`payload: ${JSON.stringify(preview, null, 2).split('\n').join('\n         ')}`)
+      if (sizeInfo) console.log(`size:    ${sizeInfo.width ?? sizeInfo.aspect} via ${sizeInfo.param}`)
+      console.log(estimate === null ? 'cost: unknown (not in models.json)' : `cost estimate: $${estimate}`)
+      console.log(`output:  ${outFile}`)
+      console.log('dry run — nothing was uploaded or generated')
+    }
+    return
+  }
+
+  if (estimate !== null && estimate > maxUsd) die(`estimated $${estimate} exceeds --max-usd ${maxUsd}.`)
+  if (estimate === null && !flags.yes) {
+    die(`cost unknown for ${modelId}. Add "costPerImageUsd" to models.json, or pass --yes to accept any charge.`)
+  }
+
+  const key = apiKey()
+
+  const cacheFile = join(CACHE_DIR, 'results', `${cacheKey}.${ext}`)
+  if (!flags.noCache && existsSync(cacheFile)) {
+    mkdirp(dirname(outFile))
+    copyFileSync(cacheFile, outFile)
+    writeFileSync(`${outFile}.json`, JSON.stringify({ model: modelId, payload, cached: true, file: outFile }, null, 2))
+    if (flags.json) console.log(JSON.stringify({ ok: true, cached: true, file: outFile }, null, 2))
+    else console.log(`cache hit (identical prompt + references) → ${outFile}`)
+    return
+  }
+
+  payload.image_urls = await uploadRefs(refs, key)
+  for (const [flag, field] of [
+    ['mask', 'mask_url'],
+    ['markup', 'markup_image_url'],
+  ]) {
+    const list = flags[flag]
+    if (!list || list.length === 0) continue
+    if (!fields[field]) die(`${modelId} has no "${field}" parameter`)
+    payload[field] = (await uploadRefs([list[list.length - 1]], key))[0]
+  }
+
+  process.stderr.write(`editing with ${modelId}…\n`)
+  const job = await submit(modelId, payload, key)
+  await waitFor(job, key, Number(flags.timeout || 300))
+  const result = await fetchResult(job, key)
+  const image = firstImage(result)
+  const bytes = await download(image.url, outFile)
+
+  mkdirp(join(CACHE_DIR, 'results'))
+  copyFileSync(outFile, cacheFile)
+
+  const manifest = {
+    model: modelId,
+    mode: 'edit',
+    label: entry?.label || null,
+    prompt: payload.prompt,
+    payload: { ...payload, image_urls: '[uploaded]' },
+    references: refs,
+    referenceHashes: localHashes,
+    size: sizeInfo,
+    costEstimateUsd: estimate,
+    file: outFile,
+    bytes,
+    width: image.width,
+    height: image.height,
+    requestId: job.request_id,
+    createdAt: new Date().toISOString(),
+  }
+  writeFileSync(`${outFile}.json`, JSON.stringify(manifest, null, 2))
+  mkdirp(CONFIG_DIR)
+  appendFileSync(SPEND_LOG, `${JSON.stringify({ at: manifest.createdAt, model: modelId, mode: 'edit', images: n, estimatedUsd: estimate, file: outFile })}\n`)
+
+  if (flags.json) console.log(JSON.stringify({ ok: true, ...manifest }, null, 2))
+  else {
+    console.log(`${outFile} — ${image.width || '?'}×${image.height || '?'}, ${(bytes / 1024).toFixed(0)} KB`)
+    console.log(`manifest: ${outFile}.json`)
+  }
+}
+
 async function cmdModels(args, flags) {
   const registry = loadRegistry()
   const sub = args[0]
@@ -577,6 +751,7 @@ const main = async () => {
   try {
     if (!command || command === 'help' || flags.help) return console.log(HELP)
     if (command === 'gen') return await cmdGen(flags)
+    if (command === 'edit') return await cmdEdit(flags)
     if (command === 'models') return await cmdModels(flags._, flags)
     if (command === 'spend') return cmdSpend(flags)
     if (command === 'auth') return cmdAuth()

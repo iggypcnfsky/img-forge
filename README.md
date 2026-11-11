@@ -53,6 +53,19 @@ it is the cheapest way to see whether a parameter is real.
 | `--seed 42` | `seed` | |
 | `--set key=value` | that literal field | validated like everything else |
 
+### Editing an existing image
+
+```bash
+./img edit --prompt "make it a glassmorphism panel, keep the text" \
+           --ref out/cover.png --reasoning high --quality high
+./img edit --prompt "recolor to deep green" --ref a.png --ref b.png --dry-run
+./img edit --prompt "remove the logo" --ref shot.png --mask mask.png
+```
+
+`edit` models take `image_urls` (required) plus optional `mask_url` / `markup_image_url`. Local files
+are uploaded to the fal CDN first (initiate + PUT, no SDK), URLs pass through untouched. The cache key
+includes a hash of every local reference, so re-running the same edit costs nothing.
+
 ### Size presets
 
 `--preset <aspect>@<long-edge>` — e.g. `1:1@1k`, `16:9@2k`, `9:16@1080`. The tool converts it to
