@@ -241,7 +241,10 @@ function buildPayload(flags, fields) {
   payload.prompt = flags.prompt
 
   // shortcuts: the same fields, just friendlier on the command line
-  if (flags.reasoning !== undefined) set('reasoning_effort', flags.reasoning)
+  if (flags.reasoning !== undefined) {
+    const alias = { l: 'low', m: 'medium', h: 'high' }
+    set('reasoning_effort', alias[String(flags.reasoning).toLowerCase()] || flags.reasoning)
+  }
   if (flags.quality !== undefined) set('quality', flags.quality)
   if (flags.background !== undefined) set('background', flags.background)
   if (flags.format !== undefined) set('output_format', flags.format)
