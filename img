@@ -1,0 +1,590 @@
+#!/usr/bin/env node
+/**
+ * img-forge — image generation through fal.ai, driven by the model's own OpenAPI schema.
+ *
+ * Why schema-driven: every fal model exposes a different input contract. Instead of hard-coding
+ * parameters per model, this CLI downloads the model's OpenAPI spec, validates what you pass, and
+ * tells you which knobs that model actually has. Presets and shortcuts are thin sugar on top.
+ *
+ * Zero dependencies. Node >= 20 (uses global fetch).
+ */
+import { createHash } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, appendFileSync, chmodSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { dirname, join, basename, extname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+
+// Minimalny .env z katalogu narzędzia: IMG_FORGE_CONFIG, IMG_FORGE_CACHE, FAL_KEY.
+// Bez zależności, bez nadpisywania tego, co już jest w środowisku.
+function loadDotEnv(file) {
+  if (!existsSync(file)) return
+  for (const line of readFileSync(file, 'utf8').split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith('#')) continue
+    const eq = trimmed.indexOf('=')
+    if (eq === -1) continue
+    const key = trimmed.slice(0, eq).trim()
+    let value = trimmed.slice(eq + 1).trim()
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1)
+    }
+    if (process.env[key] === undefined) process.env[key] = value
+  }
+}
+loadDotEnv(join(HERE, '.env'))
+
+const CONFIG_DIR = process.env.IMG_FORGE_CONFIG || join(homedir(), '.config', 'img-forge')
+const CACHE_DIR = process.env.IMG_FORGE_CACHE || join(homedir(), '.cache', 'img-forge')
+const SPEND_LOG = join(CONFIG_DIR, 'spend.jsonl')
+const FAL_QUEUE = 'https://queue.fal.run'
+const OAS_TTL_MS = 24 * 60 * 60 * 1000
+const DEFAULT_MAX_USD = 0.5
+
+// --------------------------------------------------------------------- helpers
+
+const die = (msg, code = 1) => {
+  console.error(`img-forge: ${msg}`)
+  process.exit(code)
+}
+const sha = (s) => createHash('sha256').update(s).digest('hex')
+const short = (s, n = 8) => sha(s).slice(0, n)
+const mkdirp = (p) => mkdirSync(p, { recursive: true })
+
+function readJSON(file, fallback) {
+  try {
+    return JSON.parse(readFileSync(file, 'utf8'))
+  } catch {
+    return fallback
+  }
+}
+
+function parseArgs(argv) {
+  const args = { _: [], set: {} }
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i]
+    if (!token.startsWith('--')) {
+      args._.push(token)
+      continue
+    }
+    const [rawKey, inlineValue] = token.slice(2).split('=')
+    const key = rawKey.replace(/-([a-z])/g, (_, c) => c.toUpperCase())
+    let value = inlineValue
+    if (value === undefined) {
+      const next = argv[i + 1]
+      if (next === undefined || next.startsWith('--')) value = true
+      else {
+        value = next
+        i += 1
+      }
+    }
+    if (key === 'set') args.set[value.split('=')[0]] = value.slice(value.indexOf('=') + 1)
+    else args[key] = value
+  }
+  return args
+}
+
+function loadRegistry() {
+  const base = readJSON(join(HERE, 'models.json'), { models: {} })
+  const userFile = join(CONFIG_DIR, 'models.json')
+  const user = existsSync(userFile) ? readJSON(userFile, { models: {} }) : { models: {} }
+  return {
+    default: user.default || base.default,
+    models: { ...(base.models || {}), ...(user.models || {}) },
+  }
+}
+
+function apiKey({ required = true } = {}) {
+  const fromEnv = process.env.FAL_KEY || process.env.FAL_API_KEY
+  if (fromEnv) return fromEnv.trim()
+  const file = join(CONFIG_DIR, 'key')
+  if (existsSync(file)) {
+    try {
+      return readFileSync(file, 'utf8').trim()
+    } catch {
+      /* ignore */
+    }
+  }
+  if (!required) return null
+  die(
+    'missing FAL_KEY.\n' +
+      '  export FAL_KEY="key-id:key-secret"\n' +
+      `  or: mkdir -p ${CONFIG_DIR} && printf '%s' "key-id:key-secret" > ${CONFIG_DIR}/key && chmod 600 ${CONFIG_DIR}/key\n` +
+      '  get a key at https://fal.ai/dashboard/keys',
+  )
+}
+
+const mask = (key) => (key.length <= 12 ? '••••' : `${key.slice(0, 6)}…${key.slice(-4)}`)
+
+// ---------------------------------------------------------------- OpenAPI spec
+
+async function getSchema(modelId, { refresh = false } = {}) {
+  mkdirp(CACHE_DIR)
+  const file = join(CACHE_DIR, `oas-${short(modelId, 16)}.json`)
+  if (!refresh && existsSync(file)) {
+    const cached = readJSON(file, null)
+    if (cached && Date.now() - (cached.fetchedAt || 0) < OAS_TTL_MS) return cached
+  }
+  const url = `https://fal.ai/api/openapi/queue/openapi.json?endpoint_id=${encodeURIComponent(modelId)}`
+  const res = await fetch(url, { headers: { accept: 'application/json' } })
+  if (!res.ok) {
+    if (res.status === 404) die(`unknown fal endpoint: ${modelId} (no OpenAPI schema; check the id)`)
+    die(`could not fetch the schema (HTTP ${res.status})`)
+  }
+  const spec = await res.json()
+  if (!spec) die(`empty schema for ${modelId}`)
+  const doc = { modelId, fetchedAt: Date.now(), spec }
+  writeFileSync(file, JSON.stringify(doc, null, 1))
+  return doc
+}
+
+/** Flattens the input schema into { name -> { type, enum, required, schema } }. */
+function inputFields(doc) {
+  const schemas = doc.spec?.components?.schemas || {}
+  const name = Object.keys(schemas).find((k) => /Input$/.test(k))
+  if (!name) die('schema has no Input type — unsupported model shape')
+  const input = schemas[name]
+  const required = new Set(input.required || [])
+  const out = {}
+  for (const [key, raw] of Object.entries(input.properties || {})) {
+    out[key] = {
+      schema: raw,
+      enum: raw.enum || null,
+      type: Array.isArray(raw.type) ? raw.type.map((t) => (typeof t === 'string' ? t : t.type || 'ref')).join('|') : raw.type,
+      required: required.has(key),
+      default: raw.default,
+    }
+  }
+  return { name, fields: out }
+}
+
+// ---------------------------------------------------------------- payload build
+
+const ASPECTS = {
+  '1:1': [1, 1],
+  '4:3': [4, 3],
+  '3:4': [3, 4],
+  '16:9': [16, 9],
+  '9:16': [9, 16],
+  '3:2': [3, 2],
+  '2:3': [2, 3],
+  '21:9': [21, 9],
+}
+
+function parseResolution(text) {
+  const m = /^(\d+(?:\.\d+)?)(k)?$/i.exec(String(text))
+  if (!m) die(`bad resolution "${text}" — use e.g. 1k, 2k, 1024`)
+  return Math.round(m[2] ? parseFloat(m[1]) * 1024 : parseFloat(m[1]))
+}
+
+/** "16:9@2k" → { aspect: '16:9', width: 2048, height: 1152 }. */
+function parsePreset(preset) {
+  const [aspect, res] = String(preset).split('@')
+  const ratio = ASPECTS[aspect]
+  if (!ratio) die(`unknown aspect "${aspect}" — available: ${Object.keys(ASPECTS).join(', ')}`)
+  const longEdge = parseResolution(res || '1k')
+  const [a, b] = ratio
+  const landscape = a >= b
+  const width = landscape ? longEdge : Math.round((longEdge * a) / b)
+  const height = landscape ? Math.round((longEdge * b) / a) : longEdge
+  return { aspect, width, height }
+}
+
+const ENUM_ASPECT = {
+  '1:1': 'square_hd',
+  '4:3': 'landscape_4_3',
+  '3:4': 'portrait_4_3',
+  '16:9': 'landscape_16_9',
+  '9:16': 'portrait_16_9',
+}
+
+function coerce(value, field, key) {
+  const wantsNumber = (field.type || '').includes('number') || (field.type || '').includes('integer')
+  if (wantsNumber) {
+    const num = Number(value)
+    if (Number.isNaN(num)) die(`"${key}" expects a number, got "${value}"`)
+    return num
+  }
+  if ((field.type || '').includes('boolean')) {
+    if (value === true || value === 'true') return true
+    if (value === false || value === 'false') return false
+    die(`"${key}" expects true/false, got "${value}"`)
+  }
+  if (typeof value === 'string' && /^[\[{]/.test(value.trim())) {
+    try {
+      return JSON.parse(value)
+    } catch {
+      /* keep as string */
+    }
+  }
+  return value
+}
+
+function buildPayload(flags, fields) {
+  const payload = {}
+  const notes = []
+  const set = (key, value) => {
+    const field = fields[key]
+    if (!field) {
+      die(`this model has no "${key}" parameter.\n  available: ${Object.keys(fields).sort().join(', ')}`)
+    }
+    if (field.enum && !field.enum.includes(value)) {
+      die(`"${key}" must be one of: ${field.enum.join(', ')} (got "${value}")`)
+    }
+    payload[key] = coerce(value, field, key)
+  }
+
+  if (!flags.prompt) die('missing --prompt (or --prompt-file, or pipe the prompt with -)')
+  payload.prompt = flags.prompt
+
+  // skróty: to samo pole, ale czytelniej w CLI
+  if (flags.reasoning !== undefined) set('reasoning_effort', flags.reasoning)
+  if (flags.quality !== undefined) set('quality', flags.quality)
+  if (flags.background !== undefined) set('background', flags.background)
+  if (flags.format !== undefined) set('output_format', flags.format)
+  if (flags.n !== undefined) set('num_images', Number(flags.n))
+  if (flags.seed !== undefined) set('seed', Number(flags.seed))
+
+  for (const [key, raw] of Object.entries(flags.set)) {
+    let value = raw
+    if (value === 'true') value = true
+    else if (value === 'false') value = false
+    else if (/^-?\d+(\.\d+)?$/.test(value)) value = Number(value)
+    set(key, value)
+  }
+
+  return { payload, notes }
+}
+
+/** Maps a preset/size onto whatever size parameter the model actually uses. */
+function applySize(payload, flags, fields, model) {
+  if (!flags.preset && !flags.size) return null
+  const mode = model?.sizeMode || 'dims'
+  const param = model?.sizeParam || 'image_size'
+  const field = fields[param]
+  if (!field) {
+    if (flags.preset || flags.size) {
+      console.error(`img-forge: model has no "${param}" parameter — size ignored (available: ${Object.keys(fields).sort().join(', ')})`)
+    }
+    return null
+  }
+
+  if (flags.size) {
+    const m = /^(\d+)x(\d+)$/.exec(String(flags.size))
+    if (!m) die(`bad --size "${flags.size}" — use WIDTHxHEIGHT, e.g. 1536x864`)
+    const [width, height] = [Number(m[1]), Number(m[2])]
+    if (mode === 'dims') payload[param] = { width, height }
+    else if (mode === 'size') payload[param] = `${width}x${height}`
+    else if (mode === 'enum') payload[param] = width >= height ? 'landscape_16_9' : 'portrait_16_9'
+    else payload[param] = `${width}x${height}`
+    return { width, height, param, mode }
+  }
+
+  const { aspect, width, height } = parsePreset(flags.preset)
+  if (mode === 'dims') {
+    payload[param] = { width, height }
+    return { width, height, param, mode }
+  }
+  if (mode === 'enum') {
+    const value = ENUM_ASPECT[aspect]
+    if (!value) die(`this model's size enum has no preset for ${aspect}`)
+    payload[param] = value
+    return { aspect, param, mode, note: 'enum size: resolution comes from the preset name only' }
+  }
+  if (mode === 'aspect') {
+    payload[param] = aspect
+    return { aspect, param, mode }
+  }
+  payload[param] = `${width}x${height}`
+  return { width, height, param, mode }
+}
+
+// ------------------------------------------------------------------- fal calls
+
+async function submit(modelId, payload, key) {
+  const res = await fetch(`${FAL_QUEUE}/${modelId}`, {
+    method: 'POST',
+    headers: { authorization: `Key ${key}`, 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  const text = await res.text()
+  if (!res.ok) die(`fal rejected the request (HTTP ${res.status}): ${text.slice(0, 400)}`)
+  try {
+    return JSON.parse(text)
+  } catch {
+    die(`fal returned non-JSON: ${text.slice(0, 200)}`)
+  }
+}
+
+async function waitFor(job, key, timeoutSec) {
+  const deadline = Date.now() + timeoutSec * 1000
+  const statusUrl = job.status_url || `${FAL_QUEUE}/${job.request_id}/status`
+  let last = ''
+  for (;;) {
+    if (Date.now() > deadline) die(`timed out after ${timeoutSec}s — job ${job.request_id} may still run: ${statusUrl}`)
+    const res = await fetch(statusUrl, { headers: { authorization: `Key ${key}` } })
+    const body = await res.json().catch(() => ({}))
+    const status = body.status || (res.ok ? 'UNKNOWN' : `HTTP ${res.status}`)
+    if (status !== last) {
+      process.stderr.write(`  status: ${status}\n`)
+      last = status
+    }
+    if (status === 'COMPLETED') return body
+    if (status === 'ERROR' || status === 'FAILED') die(`job failed: ${JSON.stringify(body).slice(0, 300)}`)
+    await new Promise((r) => setTimeout(r, 1200))
+  }
+}
+
+async function fetchResult(job, key) {
+  const url = job.response_url || `${FAL_QUEUE}/${job.request_id}`
+  const res = await fetch(url, { headers: { authorization: `Key ${key}` } })
+  const text = await res.text()
+  if (!res.ok) die(`could not read the result (HTTP ${res.status}): ${text.slice(0, 300)}`)
+  try {
+    return JSON.parse(text)
+  } catch {
+    die(`result was not JSON: ${text.slice(0, 200)}`)
+  }
+}
+
+function firstImage(result) {
+  const images = result?.images || result?.data?.images || []
+  if (!Array.isArray(images) || images.length === 0) {
+    die(`result has no images: ${JSON.stringify(result).slice(0, 300)}`)
+  }
+  return images[0]
+}
+
+async function download(url, file) {
+  const res = await fetch(url)
+  if (!res.ok) die(`download failed (HTTP ${res.status})`)
+  const bytes = new Uint8Array(await res.arrayBuffer())
+  mkdirp(dirname(file))
+  writeFileSync(file, bytes)
+  return bytes.length
+}
+
+// ---------------------------------------------------------------------- commands
+
+const HELP = `img-forge — image generation through fal.ai
+
+  img gen --model <id> --prompt "..." [opts]
+  img models [inspect <id>]
+  img spend [--days 7]
+  img auth
+
+gen options
+  --model <id>          fal endpoint id (default from models.json)
+  --prompt <text>       prompt; "-" reads it from stdin
+  --prompt-file <path>
+  --preset <a@r>        aspect@long-edge, e.g. 16:9@2k, 1:1@1024
+  --size <WxH>          explicit pixels
+  --reasoning <l|m|h>   shortcut for reasoning_effort (only if the model has it)
+  --quality <level>     shortcut for quality
+  --background <mode>   transparent | opaque | auto
+  --format <fmt>        output format (png, webp, ...)
+  --n <int>             number of images
+  --seed <int>
+  --set key=value       any other model parameter; validated against the schema
+  --out <path>          output file (default out/gen/<slug>.<ext>)
+  --dry-run             print the payload and cost estimate, call nothing
+  --max-usd <n>         refuse above this estimate (default ${DEFAULT_MAX_USD})
+  --yes                 confirm a paid call when the cost is unknown
+  --refresh-schema      ignore the cached OpenAPI schema
+  --json                machine-readable output
+  --timeout <sec>       job timeout (default 300)
+`
+
+async function cmdGen(flags) {
+  const registry = loadRegistry()
+  const modelId = flags.model || registry.default
+  if (!modelId) die('no --model and no default in models.json')
+  const entry = registry.models[modelId] || null
+
+  if (flags.promptFile) flags.prompt = readFileSync(flags.promptFile, 'utf8')
+  if (flags.prompt === '-') flags.prompt = readFileSync(0, 'utf8')
+  if (flags.prompt) flags.prompt = String(flags.prompt).trim()
+
+  const doc = await getSchema(modelId, { refresh: Boolean(flags.refreshSchema) })
+  const { fields } = inputFields(doc)
+
+  const { payload } = buildPayload(flags, fields)
+  const sizeInfo = applySize(payload, flags, fields, entry)
+
+  // walidacja typów po zbudowaniu (schema jest źródłem prawdy)
+  for (const [key, value] of Object.entries(payload)) {
+    const field = fields[key]
+    if (!field) continue
+    if (field.enum && !field.enum.includes(value)) die(`"${key}" must be one of: ${field.enum.join(', ')}`)
+  }
+
+  const n = Number(payload.num_images || 1)
+  const unit = entry?.costPerImageUsd
+  const estimate = typeof unit === 'number' ? Number((unit * n).toFixed(3)) : null
+  const maxUsd = Number(flags.maxUsd ?? DEFAULT_MAX_USD)
+  const cacheKey = sha(`${modelId}\n${JSON.stringify(payload)}`)
+  const ext = (payload.output_format || 'png').toLowerCase()
+  const slug = (flags.name || String(payload.prompt || 'image')).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48) || 'image'
+  const outFile = resolve(flags.out || join('out', 'gen', `${slug}-${cacheKey.slice(0, 8)}.${ext}`))
+
+  const costLine = estimate === null ? 'cost: unknown (not in models.json)' : `cost estimate: $${estimate}`
+
+  if (flags.dryRun) {
+    const report = { ok: true, dryRun: true, model: modelId, endpoint: `${FAL_QUEUE}/${modelId}`, payload, size: sizeInfo, cost: estimate, out: outFile }
+    if (flags.json) console.log(JSON.stringify(report, null, 2))
+    else {
+      console.log(`model:   ${modelId}${entry ? ` (${entry.label})` : ''}`)
+      console.log(`payload: ${JSON.stringify(payload, null, 2).split('\n').join('\n         ')}`)
+      if (sizeInfo) console.log(`size:    ${sizeInfo.width}×${sizeInfo.height} via ${sizeInfo.param}`)
+      console.log(costLine)
+      console.log(`output:  ${outFile}`)
+      console.log('dry run — nothing was generated')
+    }
+    return
+  }
+
+  if (estimate !== null && estimate > maxUsd) {
+    die(`estimated $${estimate} exceeds --max-usd ${maxUsd}. Raise the limit explicitly if that is intended.`)
+  }
+  if (estimate === null && !flags.yes) {
+    die(`cost unknown for ${modelId}. Add "costPerImageUsd" to models.json, or pass --yes to accept any charge.`)
+  }
+
+  const key = apiKey()
+
+  // cache: identyczny payload = brak kosztu
+  const cacheFile = join(CACHE_DIR, 'results', `${cacheKey}.${ext}`)
+  if (!flags.noCache && existsSync(cacheFile)) {
+    mkdirp(dirname(outFile))
+    copyFileSync(cacheFile, outFile)
+    const manifest = { model: modelId, payload, cached: true, file: outFile, createdAt: new Date().toISOString() }
+    writeFileSync(`${outFile}.json`, JSON.stringify(manifest, null, 2))
+    if (flags.json) console.log(JSON.stringify({ ok: true, cached: true, file: outFile }, null, 2))
+    else console.log(`cache hit (identical payload) → ${outFile}`)
+    return
+  }
+
+  process.stderr.write(`generating with ${modelId}…\n`)
+  const job = await submit(modelId, payload, key)
+  await waitFor(job, key, Number(flags.timeout || 300))
+  const result = await fetchResult(job, key)
+  const image = firstImage(result)
+  const bytes = await download(image.url, outFile)
+
+  mkdirp(join(CACHE_DIR, 'results'))
+  copyFileSync(outFile, cacheFile)
+
+  const manifest = {
+    model: modelId,
+    label: entry?.label || null,
+    payload,
+    size: sizeInfo,
+    costEstimateUsd: estimate,
+    file: outFile,
+    bytes,
+    width: image.width,
+    height: image.height,
+    requestId: job.request_id,
+    createdAt: new Date().toISOString(),
+  }
+  writeFileSync(`${outFile}.json`, JSON.stringify(manifest, null, 2))
+  mkdirp(CONFIG_DIR)
+  appendFileSync(SPEND_LOG, `${JSON.stringify({ at: manifest.createdAt, model: modelId, images: n, estimatedUsd: estimate, file: outFile })}\n`)
+
+  if (flags.json) console.log(JSON.stringify({ ok: true, ...manifest }, null, 2))
+  else {
+    console.log(`${outFile} — ${image.width || '?'}×${image.height || '?'}, ${(bytes / 1024).toFixed(0)} KB`)
+    console.log(`manifest: ${outFile}.json`)
+  }
+}
+
+async function cmdModels(args, flags) {
+  const registry = loadRegistry()
+  const sub = args[0]
+  if (sub === 'inspect') {
+    const id = args[1]
+    if (!id) die('usage: img models inspect <endpoint-id>')
+    const doc = await getSchema(id, { refresh: Boolean(flags.refreshSchema) })
+    const { name, fields } = inputFields(doc)
+    if (flags.json) {
+      console.log(JSON.stringify({ model: id, input: name, fields }, null, 2))
+      return
+    }
+    console.log(`${id}\n  input: ${name}\n`)
+    for (const [key, field] of Object.entries(fields)) {
+      const bits = [field.type, field.required ? 'required' : `default: ${JSON.stringify(field.default)}`]
+      if (field.enum) bits.push(`one of ${field.enum.join('|')}`)
+      console.log(`  ${key.padEnd(22)} ${bits.filter(Boolean).join(' · ')}`)
+    }
+    return
+  }
+
+  if (flags.json) {
+    console.log(JSON.stringify(registry, null, 2))
+    return
+  }
+  console.log(`default: ${registry.default || '(none)'}\n`)
+  for (const [id, entry] of Object.entries(registry.models)) {
+    const cost = typeof entry.costPerImageUsd === 'number' ? `$${entry.costPerImageUsd}/image` : 'cost unknown'
+    console.log(`  ${id}`)
+    console.log(`    ${entry.label || ''} · ${cost}${entry.sizeMode ? ` · sizeMode: ${entry.sizeMode}` : ''}`)
+  }
+  console.log('\nadd models in models.json or ~/.config/img-forge/models.json')
+}
+
+function cmdSpend(flags) {
+  if (!existsSync(SPEND_LOG)) {
+    console.log('no recorded spend')
+    return
+  }
+  const days = Number(flags.days || 0)
+  const cutoff = days > 0 ? Date.now() - days * 86400000 : 0
+  const rows = readFileSync(SPEND_LOG, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((r) => Date.parse(r.at) >= cutoff)
+  const byModel = {}
+  let total = 0
+  let unknown = 0
+  for (const row of rows) {
+    if (typeof row.estimatedUsd === 'number') {
+      total += row.estimatedUsd
+      byModel[row.model] = (byModel[row.model] || 0) + row.estimatedUsd
+    } else unknown += 1
+  }
+  if (flags.json) {
+    console.log(JSON.stringify({ runs: rows.length, estimatedUsd: Number(total.toFixed(3)), unknownCostRuns: unknown, byModel }, null, 2))
+    return
+  }
+  console.log(`runs: ${rows.length}${days ? ` (last ${days}d)` : ''}`)
+  console.log(`estimated spend: $${total.toFixed(3)}${unknown ? ` (+${unknown} runs with unknown cost)` : ''}`)
+  for (const [model, usd] of Object.entries(byModel).sort((a, b) => b[1] - a[1])) {
+    console.log(`  ${model} — $${usd.toFixed(3)}`)
+  }
+}
+
+function cmdAuth() {
+  const key = apiKey({ required: false })
+  if (!key) {
+    console.log('no key: set FAL_KEY or write ~/.config/img-forge/key')
+    process.exitCode = 1
+    return
+  }
+  console.log(`key: ${mask(key)} (${process.env.FAL_KEY ? 'from FAL_KEY' : `from ${join(CONFIG_DIR, 'key')}`})`)
+}
+
+const main = async () => {
+  const [command, ...rest] = process.argv.slice(2)
+  const flags = parseArgs(rest)
+  try {
+    if (!command || command === 'help' || flags.help) return console.log(HELP)
+    if (command === 'gen') return await cmdGen(flags)
+    if (command === 'models') return await cmdModels(flags._, flags)
+    if (command === 'spend') return cmdSpend(flags)
+    if (command === 'auth') return cmdAuth()
+    die(`unknown command "${command}"\n\n${HELP}`)
+  } catch (err) {
+    if (flags.json) console.log(JSON.stringify({ ok: false, error: String(err.message || err) }, null, 2))
+    die(String(err.message || err))
+  }
+}
+
+main()

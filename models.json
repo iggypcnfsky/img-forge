@@ -1,0 +1,26 @@
+{
+  "default": "openai/gpt-image-2.6/sunburst/text-to-image",
+  "models": {
+    "openai/gpt-image-2.6/sunburst/text-to-image": {
+      "label": "GPT Image 2.6 Sunburst",
+      "sizeMode": "dims",
+      "sizeParam": "image_size",
+      "costPerImageUsd": null,
+      "notes": "OpenAI precision image model. reasoning_effort low|medium|high, quality auto..max, background auto|transparent|opaque."
+    },
+    "fal-ai/nano-banana": {
+      "label": "Nano Banana (Gemini image)",
+      "sizeMode": "aspect",
+      "sizeParam": "aspect_ratio",
+      "costPerImageUsd": null,
+      "notes": "Fast, cheap, aspect_ratio based; no reasoning or quality knobs."
+    },
+    "fal-ai/flux/dev": {
+      "label": "FLUX.1 dev",
+      "sizeMode": "dims",
+      "sizeParam": "image_size",
+      "costPerImageUsd": null,
+      "notes": "Classic dev model: prompt, image_size, num_inference_steps, guidance_scale."
+    }
+  }
+}
