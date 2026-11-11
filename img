@@ -651,6 +651,9 @@ async function cmdEdit(flags) {
 
   if (flags.dryRun) {
     const preview = { ...payload, image_urls: refs.map((r) => (/^https?:/.test(r) ? r : `<upload ${basename(r)}>`)) }
+    // maska/markup jadą do API dopiero po dry-runie, więc pokaż je jako placeholdery
+    if (flags.mask && flags.mask.length) preview.mask_url = `<upload ${basename(flags.mask[flags.mask.length - 1])}>`
+    if (flags.markup && flags.markup.length) preview.markup_image_url = `<upload ${basename(flags.markup[flags.markup.length - 1])}>`
     if (flags.json) {
       console.log(JSON.stringify({ ok: true, dryRun: true, model: modelId, payload: preview, cost: estimate, out: outFile }, null, 2))
     } else {
