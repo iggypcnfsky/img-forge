@@ -109,6 +109,25 @@ that posts jobs to its local server, which in turn runs this CLI — so the pane
 one implementation. Presets saved from the panel live in `figma-bridge/presets.json` and appear here
 too. See [the bridge README](../figma-bridge/README.md#image-generation).
 
+## Other agents (opencode, Claude Code, Codex)
+
+`img` is a plain CLI, so any agent that can run a shell already has it — put it on `PATH` once:
+
+```bash
+ln -s "$PWD/img" ~/.local/bin/img
+```
+
+Agents that speak MCP can instead use the three image tools exposed by the sibling bridge
+(`figma-bridge/mcp.mjs`): `img_models`, `img_generate`, `img_edit`. They shell out to this same
+script, so cost estimation, `--dry-run`, the payload cache and the spend log behave identically.
+
+The operating manual for agents is `.agents/skills/img-forge/SKILL.md`; opencode loads it from
+`~/.opencode/skills`, DSH from the repo:
+
+```bash
+ln -s "$PWD/.agents/skills/img-forge" ~/.opencode/skills/img-forge
+```
+
 ## Adding a model
 
 `models.json` in this directory (or `~/.config/img-forge/models.json`, which wins):
